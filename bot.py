@@ -57,6 +57,7 @@ TUTORIALS = {
     "hetzner": "https://docs.hetzner.com/cloud/api/getting-started/generating-api-token/",
 }
 
+
 async def api_request(method: str, endpoint: str, json=None, params=None, timeout=5.0):
     """Helper to make async API requests. Uses short timeout so we fail fast."""
     url = f"{API_BASE_URL.rstrip('/')}{endpoint}"
@@ -320,7 +321,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Actions
     actions_row = [
         InlineKeyboardButton("➕ Create Server", callback_data=CB_CREATE),
-        InlineKeyboardButton("🔄 Refresh", callback_data=CB_REFRESH)
+        InlineKeyboardButton("🔄 Refresh", callback_data=CB_REFRESH),
     ]
     keyboard.append(actions_row)
     keyboard.append([InlineKeyboardButton("🧹 Remove Account & Token", callback_data=CB_DELETE_ACCOUNT)])
