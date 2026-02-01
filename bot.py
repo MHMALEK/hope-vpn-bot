@@ -454,21 +454,43 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     intro = (
         "👋 **Welcome to Hope VPN Bot**\n\n"
-        "**What we do**\n"
-        "Hope VPN helps run **Psiphon Conduit** — a free, open tool that gives people in censored countries access to the open internet. We use your Hetzner Cloud account to create servers that run Conduit and donate bandwidth to the network.\n\n"
-        "**What is Conduit?**\n"
-        "Conduit is made by [Psiphon](https://psiphon.ca/) — the same team behind tools used by millions to bypass censorship. Conduit lets people in places where the internet is restricted (blocked sites, surveillance, throttling) connect to the global internet safely. Your server acts as a bridge: users connect through it to browse freely.\n\n"
-        "**How you help the free internet**\n"
-        "When you add a server, you donate a small slice of bandwidth. That bandwidth lets real people read news, talk to family, and access information that would otherwise be blocked. You’re not paying for their traffic — you’re just lending your server so the Conduit network can reach more people. Every server makes the network stronger and harder to shut down.\n\n"
-        "**What you need to do**\n"
-        "1. Create a Hetzner Cloud API token (link below).\n"
-        "2. Paste the token here.\n"
-        "3. We save it. Then go to **Manage servers** and add a server yourself — we create it and install Conduit.\n\n"
-        f"**Create your token:** {HETZNER_TOKEN_LINK}\n\n"
+        "_Help keep the internet open — one server at a time._\n\n"
+        "Hope VPN lets you donate a small amount of server bandwidth to help people in censored countries access the open internet safely.\n\n"
+        "_No ads. No tracking. Just quiet help._\n\n"
+        "🌍 **What does Hope VPN do?**\n\n"
+        "Hope VPN helps run **Psiphon Conduit** — a free, open-source tool built by [Psiphon](https://psiphon.ca/), the same team whose technology is used by millions worldwide to bypass internet censorship.\n\n"
+        "Using your Hetzner Cloud account, we:\n"
+        "• Create a server\n"
+        "• Install Conduit automatically\n"
+        "• Connect it to the global Psiphon network\n\n"
+        "Your server becomes a bridge to the free internet.\n\n"
+        "🔐 **What is Conduit?**\n\n"
+        "In many countries, people face:\n"
+        "• Blocked websites\n"
+        "• Internet shutdowns\n"
+        "• Heavy surveillance\n"
+        "• Throttled connections\n\n"
+        "Conduit allows users to securely route their traffic through trusted servers — like yours — to reach the global internet freely.\n\n"
+        "_You're not hosting content. You're not monitoring anyone. You're simply helping traffic pass through._\n\n"
+        "❤️ **How you help real people**\n\n"
+        "By adding a server, you:\n"
+        "• Donate a small slice of bandwidth\n"
+        "• Help people read news, learn, and communicate\n"
+        "• Strengthen a network that's harder to block or shut down\n\n"
+        "You do not pay for users' traffic — you just lend your server's availability.\n\n"
+        "_Every server matters. Every server helps._\n\n"
+        "🛠 **What you need to do**\n\n"
+        "1️⃣ Create a Hetzner Cloud API token\n"
+        "2️⃣ Paste the token here\n"
+        "3️⃣ Go to **Manage servers** and add a server\n"
+        "→ We handle setup and install Conduit automatically\n\n"
+        f"🔗 **Create your token:**\n{HETZNER_TOKEN_LINK}\n\n"
         "[Conduit](https://conduit.psiphon.ca/) · [Psiphon / Support](https://psiphon.ca/)"
     )
     if stats_block:
-        intro += "\n\n**Network**\n" + stats_block
+        intro += "\n\n📊 **Network status**\n\n" + stats_block
+    else:
+        intro += "\n\n📊 **Network status**\n\n• Everyone starts somewhere 🌱"
     await update.message.reply_text(intro, parse_mode="Markdown")
     await update.message.reply_text(
         "Send your **Hetzner API token** in your next message (or /cancel):",
