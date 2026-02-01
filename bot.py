@@ -392,9 +392,15 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "provider": provider
     }
     
-    resp = await api_request("POST", "/selections", json=payload)
+    resp, err = await api_request_with_error(
+        "POST", "/selections", json=payload, timeout=15.0
+    )
     if not resp:
-        await update.message.reply_text("❌ Failed to verify/save your token. Please try again or /start over.")
+        msg = (
+            "❌ **Failed to verify/save your token.**\n\n"
+            f"_{err or 'Please try again or /start over.'}_"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
         return ENTER_TOKEN
 
     if context.user_data.get("token_action") == "update":
@@ -488,11 +494,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     parse_mode="Markdown",
                 )
             else:
-                await update.callback_query.edit_message_text(
+                # Entering from "Manage servers" button: send new message (more reliable than editing)
+                sent = await update.callback_query.message.reply_text(
                     text, reply_markup=server_markup,
                     parse_mode="Markdown",
                 )
-                context.user_data["main_menu_message_id"] = update.callback_query.message.message_id
+                context.user_data["main_menu_message_id"] = sent.message_id
                 context.user_data["main_menu_chat_id"] = chat_id
         else:
             sent = await update.message.reply_text(
