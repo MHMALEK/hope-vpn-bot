@@ -32,6 +32,8 @@ A Telegram bot that asks users to choose **Hertz** or **Digital Ocean** when the
 
    This watches `bot.py` and restarts the bot when you save changes. Press Ctrl+C to stop.
 
+5. **Production:** If you run the bot on a server (not your laptop), set `API_BASE_URL` in `.env` to your **deployed** Hope VPN API URL (e.g. `https://api.yourdomain.com`). If you leave it as `http://localhost:3000`, the bot will try to reach the API on the same machine and "Manage servers" (and other API features) will fail.
+
 ## Flow
 
 - User sends **/start** → sees inline buttons: **Hertz** | **Digital Ocean**.
