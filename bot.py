@@ -35,33 +35,30 @@ logger = logging.getLogger(__name__)
 # API Configuration
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
 
-# Conversation states
-SELECT_PROVIDER, ENTER_TOKEN, MAIN_MENU, SERVER_DETAILS, ACCOUNT_CONFIRM = range(5)
+# Conversation states (Hetzner-only: no provider selection)
+ENTER_TOKEN, MAIN_MENU, SERVER_DETAILS, ACCOUNT_CONFIRM = range(4)
 
 # Callback data prefixes
-CB_PROVIDER = "prov_"
 CB_SERVER = "srv_"
 CB_CREATE = "create_server"
 CB_REFRESH = "refresh"
-CB_DELETE = "del_"
 CB_MANAGE = "manage_"
 CB_REFRESH_SERVER = "refresh_srv_"
 CB_CHECK = "check_"
 CB_METRICS = "metrics_"
 CB_VPN_VERIFY = "vpn_verify_"
 CB_SSH_KEY = "ssh_key_"
-CB_TOKEN_UPDATE = "token_update_"
-CB_TOKEN_REMOVE = "token_remove_"
-CB_TOKEN_REPLACE = "token_replace_"
 CB_MANAGE_SERVERS = "manage_servers"
-CB_ADD_PROVIDER = "add_provider"
-CB_BACK_TOKENS = "back_tokens"
-CB_DELETE_ACCOUNT = "delete_account"
-CB_CONFIRM_DELETE_ACCOUNT = "confirm_delete_account"
-CB_CANCEL_DELETE_ACCOUNT = "cancel_delete_account"
+CB_REPLACE_TOKEN = "replace_token"
 CB_BACK_DETAILS = "back_details"
 CB_BACK = "back_main"
 CB_TOKEN_CANCEL = "token_cancel"
+CB_DELETE_ACCOUNT = "delete_account"
+CB_CONFIRM_DELETE_ACCOUNT = "confirm_delete_account"
+CB_CANCEL_DELETE_ACCOUNT = "cancel_delete_account"
+
+# Hetzner token creation link (only supported provider)
+HETZNER_TOKEN_LINK = "https://docs.hetzner.com/cloud/api/getting-started/generating-api-token/"
 
 # Vendor-neutral status display (API status -> emoji, label)
 STATUS_READY = ("active", "running")
@@ -186,13 +183,6 @@ def _format_global_stats(stats: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
-# Tutorial Links
-TUTORIALS = {
-    "linode": "https://www.linode.com/docs/guides/getting-started-with-the-linode-api/#get-an-access-token",
-    "hetzner": "https://docs.hetzner.com/cloud/api/getting-started/generating-api-token/",
-}
-
-
 async def api_request(method: str, endpoint: str, json=None, params=None, timeout=5.0):
     """Helper to make async API requests. Uses short timeout so we fail fast."""
     url = f"{API_BASE_URL.rstrip('/')}{endpoint}"
@@ -244,17 +234,16 @@ async def api_request_with_error(method: str, endpoint: str, json=None, params=N
             return None, str(e) or "Request failed"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point: Sign up user and show providers."""
+    """Entry point: Sign up user. New users see instructions + token link, then enter Hetzner token."""
     user = update.effective_user
     logger.info("User %s (%s) started the bot.", user.first_name, user.id)
 
-    # 1. Signup
     try:
         signup_data = await api_request("POST", "/signup", json={"telegramId": str(user.id)})
     except Exception as e:
         logger.error(f"Signup exception: {e}")
         signup_data = None
-        
+
     user_id = signup_data.get("userId") if signup_data else None
     if not user_id:
         err_text = (
@@ -272,17 +261,62 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     stats = await api_request("GET", "/stats/aggregate")
     stats_block = _format_global_stats(stats)
+
+    # Check if user already has a Hetzner token or servers
+    has_existing = False
+    try:
+        user_info = await api_request(
+            "GET", "/user", params={"userId": str(user_id), "telegramId": str(user.id)}
+        )
+        if user_info:
+            api_user_id = user_info.get("userId")
+            if api_user_id and api_user_id != user_id:
+                context.user_data["user_id"] = api_user_id
+                user_id = api_user_id
+            selections = user_info.get("selections") or []
+            if selections:
+                has_existing = True
+            servers = await api_request("GET", "/servers", params={"userId": str(user_id)})
+            if servers and len(servers) > 0:
+                has_existing = True
+    except Exception as e:
+        logger.error(f"Error fetching user info: {e}")
+
+    if has_existing:
+        intro = (
+            "👋 Welcome back to Hope VPN Bot\n\n"
+            "**What we do**\n"
+            "Hope VPN runs servers for Psiphon Conduit — a free tool that helps people in censored regions reach the open internet. Your Hetzner servers run Conduit and contribute bandwidth so others can browse freely.\n\n"
+            "**What you can do here**\n"
+            "• View your servers and their status (creating, deploying, or ready)\n"
+            "• Add new servers to grow your contribution\n"
+            "• Replace your Hetzner token or remove your account\n\n"
+            "[Psiphon Conduit](https://conduit.psiphon.ca/)\n"
+            "[Support](https://psiphon.ca/)"
+        )
+        if stats_block:
+            intro += "\n\n**Network stats**\n" + stats_block
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🧰 Manage servers", callback_data=CB_MANAGE_SERVERS)],
+                [InlineKeyboardButton("🔑 Replace token", callback_data=CB_REPLACE_TOKEN)],
+                [InlineKeyboardButton("🧹 Remove Account", callback_data=CB_DELETE_ACCOUNT)],
+            ]
+        )
+        target = update.message.reply_text if update.message else update.callback_query.message.reply_text
+        await target(intro, reply_markup=keyboard, parse_mode="Markdown")
+        return MAIN_MENU
+
+    # New user: show instructions and ask for Hetzner token
     intro = (
         "👋 Welcome to Hope VPN Bot\n\n"
-        "This bot helps you:\n"
-        "• Create and manage VPN servers on supported providers\n"
-        "• Check server health, verify VPN, and view metrics\n"
-        "• Manage provider API tokens and SSH keys\n\n"
-        "How it works\n"
-        "1. Select a hosting provider from the options.\n"
-        "2. Create an API token with that provider.\n"
-        "3. Paste the token here and the bot provisions your server and adds it to Psiphon Conduit.\n\n"
-        "Learn more\n"
+        "**What we do**\n"
+        "Hope VPN helps run **Psiphon Conduit** — a free tool that gives people in censored regions access to the open internet. We use your Hetzner Cloud account to create VPN servers that run Conduit and contribute bandwidth to the network.\n\n"
+        "**How it works**\n"
+        "1. Create a Hetzner Cloud API token (link below).\n"
+        "2. Paste the token here.\n"
+        "3. We create and deploy a server, install Conduit, and add it to the Psiphon network. You can add more servers anytime.\n\n"
+        f"**Create your token:** {HETZNER_TOKEN_LINK}\n\n"
         "• Psiphon Conduit: https://conduit.psiphon.ca/\n"
         "• Support: https://psiphon.ca/\n\n"
         "By continuing, you agree to our Terms of Service."
@@ -290,144 +324,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if stats_block:
         intro += "\n\n🌍 Network stats\n" + stats_block
 
-    # 3. Check if user already has a selection setup
-    has_existing = False
-    try:
-        selections = await api_request("GET", "/selections", params={"userId": str(user_id)})
-        if isinstance(selections, list) and len(selections) > 0:
-            has_existing = True
-        # If user exists but has no selection, still show servers (if any)
-        user_info = await api_request(
-            "GET",
-            "/user",
-            params={"userId": str(user_id), "telegramId": str(user.id)},
-        )
-        if user_info:
-            info_selections = user_info.get("selections") or []
-            if info_selections:
-                api_user_id = user_info.get("userId")
-                if api_user_id and api_user_id != user_id:
-                    context.user_data["user_id"] = api_user_id
-                    user_id = api_user_id
-                has_existing = True
-            servers = await api_request("GET", "/servers", params={"userId": str(user_id)})
-            if servers:
-                has_existing = True
-    except Exception as e:
-        logger.error(f"Error fetching user info: {e}")
-        # Continue to provider selection even if user fetch fails (assuming new user flow)
-    if has_existing:
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("🧰 Manage servers", callback_data=CB_MANAGE_SERVERS)],
-                [InlineKeyboardButton("➕ Add provider", callback_data=CB_ADD_PROVIDER)],
-                [InlineKeyboardButton("🧹 Remove Account", callback_data=CB_DELETE_ACCOUNT)],
-            ]
-        )
-        target = update.message.reply_text if update.message else update.callback_query.message.reply_text
-        await target(intro, reply_markup=keyboard)
-        return MAIN_MENU
+    token_prompt = (
+        "Send your **Hetzner API token** in your next message.\n\n"
+        f"_How to create a token: {HETZNER_TOKEN_LINK}_"
+    )
+    cancel_btn = InlineKeyboardButton("Cancel", callback_data=CB_TOKEN_CANCEL)
     target = update.message.reply_text if update.message else update.callback_query.message.reply_text
-    await target(intro)
+    await target(intro, parse_mode="Markdown")
+    await target(token_prompt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[cancel_btn]]))
 
-    # 4. Get Providers
-    providers = await api_request("GET", "/providers")
-    if not providers:
-        target = update.message.reply_text if update.message else update.callback_query.message.reply_text
-        await target(
-            "⚠️ **Error**: Could not fetch providers.\n"
-            "The API might be reachable but returning empty data.",
-            parse_mode="Markdown",
-        )
-        return ConversationHandler.END
-
-    # One provider per row
-    keyboard = []
-    for p in providers:
-        if p.get("isActive", True):
-            btn = InlineKeyboardButton(p["name"].title(), callback_data=f"{CB_PROVIDER}{p['name']}")
-            keyboard.append([btn])
-
-    target = update.message.reply_text if update.message else update.callback_query.message.reply_text
-    await target(
-        "Please select a provider to host your VPN server:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return SELECT_PROVIDER
-
-
-async def _show_token_prompt(query, provider_name: str, action: str) -> None:
-    """Show token input prompt for a provider."""
-    tutorial_link = TUTORIALS.get(provider_name.lower(), "https://google.com")
-    title = "Update token" if action == "update" else "Add token"
-    msg = (
-        f"**{title}** for **{provider_name.title()}**.\n\n"
-        "Please create an API token for your account and paste it in your next message.\n\n"
-        f"Tutorial: {tutorial_link}\n\n"
-        "_You can cancel and pick another provider with the button below, or send /cancel or /start to start over._"
-    )
-    cancel_btn = InlineKeyboardButton("◀️ Cancel – pick another provider", callback_data=CB_TOKEN_CANCEL)
-    await query.edit_message_text(
-        msg,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[cancel_btn]]),
-    )
-
-
-async def handle_provider_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save provider choice and ask for token."""
-    query = update.callback_query
-    await query.answer()
-
-    provider_name = query.data.replace(CB_PROVIDER, "")
-    context.user_data["provider"] = provider_name
-    context.user_data["token_action"] = context.user_data.get("token_action") or "add"
-    user_id = context.user_data.get("user_id")
-    if user_id:
-        selections = await api_request("GET", "/selections", params={"userId": str(user_id)}) or []
-        for sel in selections:
-            provider = (sel.get("Provider") or sel.get("provider")) or {}
-            if (provider.get("name") or "").lower() == provider_name.lower():
-                keyboard = [
-                    [InlineKeyboardButton("🗑 Remove & add new token", callback_data=f"{CB_TOKEN_REPLACE}{provider_name}")],
-                    [InlineKeyboardButton("🧰 Manage servers", callback_data=CB_MANAGE_SERVERS)],
-                ]
-                await query.edit_message_text(
-                    f"✅ **{provider_name.title()} token already saved.**\n"
-                    "Do you want to remove it and add a new one?\n\n"
-                    "Tip: Use /manage to see your servers.",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown",
-                )
-                return SELECT_PROVIDER
-    await _show_token_prompt(query, provider_name, context.user_data["token_action"])
+    context.user_data["provider"] = "hetzner"
+    context.user_data["token_action"] = "add"
     return ENTER_TOKEN
 
 
-async def handle_existing_token_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle replace/keep when token already exists for provider."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = context.user_data.get("user_id")
-    if data.startswith(CB_TOKEN_REPLACE):
-        provider_name = data.replace(CB_TOKEN_REPLACE, "")
-        if not user_id:
-            await query.edit_message_text("⚠️ Session lost. Send /start to begin.")
-            return ConversationHandler.END
-        resp, err = await api_request_with_error(
-            "DELETE", "/selections", json={"userId": user_id, "provider": provider_name}
-        )
-        if not resp:
-            await query.edit_message_text(
-                f"⚠️ Failed to remove token.\n\n_{err or 'Please try again.'}_",
-                parse_mode="Markdown",
-            )
-            return SELECT_PROVIDER
-        context.user_data["token_action"] = "add"
-        await _show_token_prompt(query, provider_name, "add")
-        return ENTER_TOKEN
-    return SELECT_PROVIDER
+async def _show_replace_token_prompt(query) -> None:
+    """Show token input prompt for replacing Hetzner token."""
+    msg = (
+        "**Replace Hetzner token**\n\n"
+        "Paste your new Hetzner API token in your next message.\n\n"
+        f"Tutorial: {HETZNER_TOKEN_LINK}\n\n"
+        "_Send /cancel to go back._"
+    )
+    cancel_btn = InlineKeyboardButton("Cancel", callback_data=CB_TOKEN_CANCEL)
+    await query.edit_message_text(
+        msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[cancel_btn]])
+    )
 
 
 async def handle_manage_servers_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -437,50 +359,21 @@ async def handle_manage_servers_callback(update: Update, context: ContextTypes.D
     return await show_main_menu(update, context)
 
 
-async def show_provider_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show provider selection list."""
-    providers = await api_request("GET", "/providers")
-    if not providers:
-        target = update.callback_query.edit_message_text if update.callback_query else update.message.reply_text
-        await target("Could not load providers. Try /start again.")
-        return ConversationHandler.END
-    keyboard = []
-    for p in providers:
-        if p.get("isActive", True):
-            keyboard.append([InlineKeyboardButton(p["name"].title(), callback_data=f"{CB_PROVIDER}{p['name']}")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=CB_BACK_TOKENS)])
-    target = update.callback_query.edit_message_text if update.callback_query else update.message.reply_text
-    await target(
-        "Please select a provider to host your VPN server:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-    return SELECT_PROVIDER
-
-
 async def manage_servers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Command: /manage to show servers list."""
     # show_main_menu will restore user_id from API by telegramId if missing
     return await show_main_menu(update, context)
 
 async def handle_token_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User cancelled token step – show provider selection again."""
+    """User cancelled token step – go back to main menu or end."""
     query = update.callback_query
     await query.answer()
-    if context.user_data.get("return_to") == "manage_tokens":
-        return await show_manage_tokens(update, context)
-    providers = await api_request("GET", "/providers")
-    if not providers:
-        await query.edit_message_text("Could not load providers. Try /start again.")
-        return ConversationHandler.END
-    keyboard = []
-    for p in providers:
-        if p.get("isActive", True):
-            keyboard.append([InlineKeyboardButton(p["name"].title(), callback_data=f"{CB_PROVIDER}{p['name']}")])
-    await query.edit_message_text(
-        "Please select a provider to host your VPN server:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return SELECT_PROVIDER
+    if context.user_data.get("return_to") == "replace_token":
+        context.user_data.pop("return_to", None)
+        return await show_main_menu(update, context)
+    await query.edit_message_text("Cancelled. Send /start to try again.")
+    return ConversationHandler.END
+
 
 async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Validate token and save selection."""
@@ -509,43 +402,33 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("✅ Token verified successfully!")
     context.user_data.pop("token_action", None)
+    context.user_data.pop("return_to", None)
 
     stats = await api_request("GET", "/stats/aggregate", params={"includeMetrics": "1"})
-    provider_name = provider.title() if provider else "your provider"
     impact_text = _format_global_stats(stats) or "• Every contribution helps."
 
     await update.message.reply_text(
         "💡 **About your token**\n\n"
-        f"We use your {provider_name} token only to create and manage servers.\n"
-        "Estimated cost: ~5 EUR per month per server (billed by the provider).\n\n"
+        "We use your Hetzner token only to create and manage servers.\n"
+        "Estimated cost: ~5 EUR per month per server (billed by Hetzner).\n\n"
         "**Network stats**\n"
         f"{impact_text}\n\n"
         "Your contribution helps keep the internet free and open.",
         parse_mode="Markdown",
     )
-    if context.user_data.get("return_to") == "manage_tokens":
-        return await show_manage_tokens(update, context)
     return await show_main_menu(update, context)
 
 def _build_server_list_content(servers: list, stats: Optional[dict]) -> str:
-    """Build server list text (no keyboard)."""
-    server_count = len(servers)
-    text = f"Servers ({server_count})\n\n"
-
+    """Build server list text: title and description only (servers are buttons)."""
+    text = "**Servers**\n\n"
+    text += "Tap a server below to see details, metrics, Iran reachability, and verify VPN."
     if not servers:
-        text += "No servers yet. Use the buttons below to create one."
-        return text
-
-    for i, s in enumerate(servers, 1):
-        emoji, status_label = _vpn_ready_label(s)
-        label = (s.get("label") or s.get("id", "")[:8]).strip() or f"Server {i}"
-        text += f"{i}. {label} — {emoji} {status_label}\n"
-        text += "\n"
-    return text.strip()
+        text += "\n\nNo servers yet. Use the button below to add one."
+    return text
 
 
 def _build_server_list_keyboard(servers: list) -> Optional[InlineKeyboardMarkup]:
-    """Build server list keyboard with a back button."""
+    """Build server list keyboard (no delete). Add new server at end."""
     keyboard = []
     for i, s in enumerate(servers, 1):
         emoji, _ = _vpn_ready_label(s)
@@ -553,11 +436,11 @@ def _build_server_list_keyboard(servers: list) -> Optional[InlineKeyboardMarkup]
         keyboard.append([InlineKeyboardButton(f"{emoji} {label}", callback_data=f"{CB_SERVER}{s['id']}")])
         keyboard.append([
             InlineKeyboardButton("ℹ️ Info", callback_data=f"{CB_MANAGE}{s['id']}"),
-            InlineKeyboardButton("🔄", callback_data=f"{CB_REFRESH_SERVER}{s['id']}"),
-            InlineKeyboardButton("🗑", callback_data=f"{CB_DELETE}{s['id']}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"{CB_REFRESH_SERVER}{s['id']}"),
         ])
+    keyboard.append([InlineKeyboardButton("➕ Add new server", callback_data=CB_CREATE)])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=CB_BACK)])
-    return InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=CB_BACK)]])
+    return InlineKeyboardMarkup(keyboard)
 
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -594,12 +477,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     server_markup = _build_server_list_keyboard(servers)
 
-    # Actions keyboard (second message)
-    actions_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Create Server", callback_data=CB_CREATE), InlineKeyboardButton("🔄 Refresh", callback_data=CB_REFRESH)],
-        [InlineKeyboardButton("🧹 Remove Account & Servers", callback_data=CB_DELETE_ACCOUNT)],
-    ])
-
     chat_id = update.effective_chat.id
     try:
         if is_callback:
@@ -608,20 +485,22 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await context.bot.edit_message_text(
                     chat_id=chat_id, message_id=msg_id,
                     text=text, reply_markup=server_markup,
+                    parse_mode="Markdown",
                 )
             else:
                 await update.callback_query.edit_message_text(
                     text, reply_markup=server_markup,
+                    parse_mode="Markdown",
                 )
                 context.user_data["main_menu_message_id"] = update.callback_query.message.message_id
                 context.user_data["main_menu_chat_id"] = chat_id
         else:
             sent = await update.message.reply_text(
                 text, reply_markup=server_markup,
+                parse_mode="Markdown",
             )
             context.user_data["main_menu_message_id"] = sent.message_id
             context.user_data["main_menu_chat_id"] = chat_id
-            await update.message.reply_text("Choose an action:", reply_markup=actions_markup)
     except BadRequest as e:
         if "not modified" not in (e.message or "").lower():
             raise
@@ -663,7 +542,7 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
             msg = (
                 "❌ **Failed to create server**\n\n"
                 f"_{err or 'Check your token/funds.'}_\n\n"
-                "If this keeps happening, run /start and re-save your provider token."
+                "If this keeps happening, run /start and replace your Hetzner token."
             )
             await query.message.reply_text(msg, parse_mode="Markdown")
         return await show_main_menu(update, context)
@@ -684,62 +563,24 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
         await api_request("GET", f"/servers/{server_id}", params={"userId": str(user_id)})
         return await show_main_menu(update, context)
 
-    elif data.startswith(CB_DELETE):
-        server_id = data.replace(CB_DELETE, "")
-        await query.edit_message_text("🗑 Deleting server...")
-        await api_request("DELETE", f"/servers/{server_id}", json={"userId": user_id})
-        await query.message.reply_text("✅ Server deleted.")
-        return await show_main_menu(update, context)
-
-    elif data == CB_ADD_PROVIDER:
-        context.user_data.pop("return_to", None)
-        return await show_provider_selection(update, context)
-
-    elif data == CB_BACK_TOKENS:
-        context.user_data.pop("return_to", None)
-        return await show_main_menu(update, context)
+    elif data == CB_REPLACE_TOKEN:
+        context.user_data["provider"] = "hetzner"
+        context.user_data["return_to"] = "replace_token"
+        context.user_data["token_action"] = "update"
+        await _show_replace_token_prompt(query)
+        return ENTER_TOKEN
 
     elif data == CB_CANCEL_DELETE_ACCOUNT:
         return await show_main_menu(update, context)
-
-    elif data.startswith(CB_TOKEN_UPDATE):
-        provider_name = data.replace(CB_TOKEN_UPDATE, "")
-        context.user_data["provider"] = provider_name
-        context.user_data["return_to"] = "manage_tokens"
-        # Determine if we are updating or adding
-        selections = await api_request("GET", "/selections", params={"userId": str(user_id)}) or []
-        has_token = False
-        for sel in selections:
-            provider = (sel.get("Provider") or sel.get("provider")) or {}
-            if (provider.get("name") or "").lower() == provider_name.lower():
-                has_token = True
-                break
-        context.user_data["token_action"] = "update" if has_token else "add"
-        await _show_token_prompt(query, provider_name, context.user_data["token_action"])
-        return ENTER_TOKEN
-
-    elif data.startswith(CB_TOKEN_REMOVE):
-        provider_name = data.replace(CB_TOKEN_REMOVE, "")
-        resp, err = await api_request_with_error(
-            "DELETE", "/selections", json={"userId": user_id, "provider": provider_name}
-        )
-        if not resp:
-            await query.message.reply_text(
-                f"⚠️ Failed to remove token.\n\n_{err or 'Please try again.'}_",
-                parse_mode="Markdown",
-            )
-        else:
-            await query.message.reply_text("✅ Token removed.")
-        return await show_manage_tokens(update, context)
 
     elif data == CB_DELETE_ACCOUNT:
         warning = (
             "⚠️ **Delete account & token**\n\n"
             "This will:\n"
             "• Remove your account\n"
-            "• Delete saved provider token\n"
+            "• Delete saved Hetzner token\n"
             "• Remove server records from the app\n\n"
-            "_Provider servers are not deleted automatically._"
+            "_Hetzner servers are not deleted automatically._"
         )
         keyboard = InlineKeyboardMarkup(
             [
@@ -779,9 +620,7 @@ async def show_server_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         verify_hint = "\nUse Verify VPN below to confirm Conduit is running.\n"
     text = (
         "ℹ️ Server Details\n\n"
-        f"ID: {server['id']}\n"
         f"IP: {ip}\n"
-        f"SSH: ssh -i server-key.pem root@{ip}\n"
         f"Status: {emoji} {status_label}\n"
         f"{vpn_line}"
         f"{verify_hint}"
@@ -791,7 +630,6 @@ async def show_server_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("🇮🇷 Iran reachability", callback_data=f"{CB_CHECK}{server_id}")],
         [InlineKeyboardButton("🔍 Verify VPN", callback_data=f"{CB_VPN_VERIFY}{server_id}")],
         [InlineKeyboardButton("📊 Metrics", callback_data=f"{CB_METRICS}{server_id}")],
-        [InlineKeyboardButton("🗑 Delete Server", callback_data=f"{CB_DELETE}{server_id}")],
         [InlineKeyboardButton("🔙 Back to List", callback_data=CB_BACK)]
     ]
     
@@ -809,14 +647,6 @@ async def handle_server_details_callback(update: Update, context: ContextTypes.D
         return await show_main_menu(update, context)
     elif data == CB_BACK_DETAILS:
         return await show_server_details(update, context)
-        
-    elif data.startswith(CB_DELETE):
-        server_id = data.replace(CB_DELETE, "")
-        await query.edit_message_text("🗑 Deleting server...")
-        
-        await api_request("DELETE", f"/servers/{server_id}", json={"userId": user_id})
-        await query.edit_message_text("✅ Server deleted.")
-        return await show_main_menu(update, context)
 
     elif data.startswith(CB_CHECK):
         server_id = data.replace(CB_CHECK, "")
@@ -982,11 +812,6 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            SELECT_PROVIDER: [
-                CallbackQueryHandler(handle_provider_selection, pattern=f"^{CB_PROVIDER}"),
-                CallbackQueryHandler(handle_existing_token_choice, pattern=f"^{CB_TOKEN_REPLACE}"),
-                CallbackQueryHandler(handle_manage_servers_callback, pattern=f"^{CB_MANAGE_SERVERS}$"),
-            ],
             ENTER_TOKEN: [
                 CallbackQueryHandler(handle_token_cancel, pattern=f"^{CB_TOKEN_CANCEL}$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_token_input),
