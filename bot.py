@@ -50,7 +50,6 @@ CB_CHECK = "check_"
 CB_METRICS = "metrics_"
 CB_VPN_VERIFY = "vpn_verify_"
 CB_SSH_KEY = "ssh_key_"
-CB_MANAGE_TOKENS = "manage_tokens"
 CB_TOKEN_UPDATE = "token_update_"
 CB_TOKEN_REMOVE = "token_remove_"
 CB_TOKEN_REPLACE = "token_replace_"
@@ -321,7 +320,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🧰 Manage servers", callback_data=CB_MANAGE_SERVERS)],
-                [InlineKeyboardButton("🔐 Manage tokens", callback_data=CB_MANAGE_TOKENS)],
                 [InlineKeyboardButton("➕ Add provider", callback_data=CB_ADD_PROVIDER)],
                 [InlineKeyboardButton("🧹 Remove Account", callback_data=CB_DELETE_ACCOUNT)],
             ]
@@ -450,6 +448,7 @@ async def show_provider_selection(update: Update, context: ContextTypes.DEFAULT_
     for p in providers:
         if p.get("isActive", True):
             keyboard.append([InlineKeyboardButton(p["name"].title(), callback_data=f"{CB_PROVIDER}{p['name']}")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=CB_BACK_TOKENS)])
     target = update.callback_query.edit_message_text if update.callback_query else update.message.reply_text
     await target(
         "Please select a provider to host your VPN server:",
@@ -563,63 +562,6 @@ def _build_server_list_keyboard(servers: list) -> Optional[InlineKeyboardMarkup]
     return InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=CB_BACK)]])
 
 
-async def show_manage_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show provider token management screen."""
-    is_callback = bool(update.callback_query)
-    user_id = context.user_data.get("user_id")
-    telegram_id = context.user_data.get("telegram_id")
-    if not user_id:
-        text = "⚠️ Session lost. Send /start to begin."
-        target = update.callback_query.edit_message_text if is_callback else update.message.reply_text
-        await target(text)
-        return ConversationHandler.END
-
-    providers = await api_request("GET", "/providers")
-    selections = await api_request("GET", "/selections", params={"userId": str(user_id)}) or []
-    selection_map = {}
-    for sel in selections:
-        provider = (sel.get("Provider") or sel.get("provider")) or {}
-        name = (provider.get("name") or "").lower()
-        if name:
-            selection_map[name] = sel
-
-    text = (
-        "🔐 **Provider Tokens**\n\n"
-        "You can store **one token per provider**.\n"
-        "Use Update to replace a token, or Remove to delete it.\n\n"
-    )
-
-    keyboard = []
-    if providers:
-        for p in providers:
-            if not p.get("isActive", True):
-                continue
-            name = p["name"]
-            has_token = name.lower() in selection_map
-            status = "✅ Saved" if has_token else "➕ Not set"
-            text += f"• **{name.title()}** — {status}\n"
-            if has_token:
-                keyboard.append([
-                    InlineKeyboardButton(f"🔄 Update {name.title()}", callback_data=f"{CB_TOKEN_UPDATE}{name}"),
-                    InlineKeyboardButton("🗑 Remove", callback_data=f"{CB_TOKEN_REMOVE}{name}"),
-                ])
-            else:
-                keyboard.append([
-                    InlineKeyboardButton(f"➕ Add {name.title()}", callback_data=f"{CB_TOKEN_UPDATE}{name}"),
-                ])
-    else:
-        text += "No providers available."
-
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=CB_BACK_TOKENS)])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if is_callback:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    return MAIN_MENU
-
-
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Display user's servers (first message) and action buttons (second message)."""
     is_callback = bool(update.callback_query)
@@ -645,7 +587,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Actions keyboard (second message)
     actions_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Create Server", callback_data=CB_CREATE), InlineKeyboardButton("🔄 Refresh", callback_data=CB_REFRESH)],
-        [InlineKeyboardButton("🔐 Manage Tokens", callback_data=CB_MANAGE_TOKENS)],
         [InlineKeyboardButton("🧹 Remove Account & Servers", callback_data=CB_DELETE_ACCOUNT)],
     ])
 
@@ -740,16 +681,15 @@ async def handle_main_menu_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text("✅ Server deleted.")
         return await show_main_menu(update, context)
 
-    elif data == CB_MANAGE_TOKENS:
-        context.user_data["return_to"] = "manage_tokens"
-        return await show_manage_tokens(update, context)
-
     elif data == CB_ADD_PROVIDER:
         context.user_data.pop("return_to", None)
         return await show_provider_selection(update, context)
 
     elif data == CB_BACK_TOKENS:
         context.user_data.pop("return_to", None)
+        return await show_main_menu(update, context)
+
+    elif data == CB_CANCEL_DELETE_ACCOUNT:
         return await show_main_menu(update, context)
 
     elif data.startswith(CB_TOKEN_UPDATE):

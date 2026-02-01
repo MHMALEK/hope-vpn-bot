@@ -49,8 +49,8 @@ from bot import get_user_token, user_tokens
 # By user_id (e.g. from update.effective_user.id)
 data = get_user_token(user_id=123456789)
 if data:
-    provider = data["provider"]       # "provider_hertz" or "provider_digitalocean"
-    provider_name = data["provider_name"]  # "Hertz" or "Digital Ocean"
+    provider = data["provider"]       # "provider_hertz"
+    provider_name = data["provider_name"]  # "Hertz" 
     token = data["token"]             # The API token
     # Use token for Hertz or Digital Ocean API calls
 ```
