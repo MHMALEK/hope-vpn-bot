@@ -459,9 +459,7 @@ async def show_provider_selection(update: Update, context: ContextTypes.DEFAULT_
 
 async def manage_servers(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Command: /manage to show servers list."""
-    if not context.user_data.get("user_id"):
-        await update.message.reply_text("⚠️ Session lost. Send /start to begin.")
-        return ConversationHandler.END
+    # show_main_menu will restore user_id from API by telegramId if missing
     return await show_main_menu(update, context)
 
 async def handle_token_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -566,6 +564,15 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Display user's servers (first message) and action buttons (second message)."""
     is_callback = bool(update.callback_query)
     user_id = context.user_data.get("user_id")
+    if not user_id and update.effective_user:
+        # Restore user_id from API by telegram ID (e.g. after session loss or /manage without /start)
+        user_info = await api_request(
+            "GET", "/user", params={"telegramId": str(update.effective_user.id)}
+        )
+        if user_info and user_info.get("userId"):
+            user_id = user_info["userId"]
+            context.user_data["user_id"] = user_id
+            context.user_data["telegram_id"] = str(update.effective_user.id)
     if not user_id:
         text = "⚠️ Session lost. Send /start to begin."
         target = update.callback_query.edit_message_text if is_callback else update.message.reply_text
@@ -578,6 +585,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         target = update.callback_query.edit_message_text if is_callback else update.message.reply_text
         await target(text)
         return MAIN_MENU
+
+    if not isinstance(servers, list):
+        servers = []
 
     stats = await api_request("GET", "/stats/aggregate")
     text = _build_server_list_content(servers, stats)
