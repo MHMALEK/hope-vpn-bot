@@ -24,6 +24,14 @@ A Telegram bot that asks users to choose **Hertz** or **Digital Ocean** when the
    python bot.py
    ```
 
+   **Development (auto re-run on file changes):**
+
+   ```bash
+   python dev.py
+   ```
+
+   This watches `bot.py` and restarts the bot when you save changes. Press Ctrl+C to stop.
+
 ## Flow
 
 - User sends **/start** → sees inline buttons: **Hertz** | **Digital Ocean**.
