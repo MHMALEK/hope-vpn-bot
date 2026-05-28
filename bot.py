@@ -31,6 +31,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
+# Service key presented to the API (header X-Bot-Key) to mint per-user tokens
+# at /auth/telegram and read global /stats.
+BOT_API_KEY = os.getenv("BOT_API_KEY", "")
 
 # Callback data: one "main" for back-to-main, rest are action + optional id
 CB_MAIN = "main"
@@ -165,12 +168,30 @@ def _format_global_stats(stats: Optional[dict]) -> str:
     return "\n".join(lines)
 
 
-async def api_request(method: str, endpoint: str, json=None, params=None, timeout=5.0):
+def _auth_headers(auth_token=None, use_bot_key=False):
+    headers = {}
+    if use_bot_key and BOT_API_KEY:
+        headers["X-Bot-Key"] = BOT_API_KEY
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    return headers
+
+
+async def api_request(
+    method: str,
+    endpoint: str,
+    json=None,
+    params=None,
+    timeout=5.0,
+    auth_token=None,
+    use_bot_key=False,
+):
     url = f"{API_BASE_URL.rstrip('/')}{endpoint}"
+    headers = _auth_headers(auth_token, use_bot_key)
     async with httpx.AsyncClient() as client:
         try:
             response = await client.request(
-                method, url, json=json, params=params, timeout=timeout
+                method, url, json=json, params=params, timeout=timeout, headers=headers
             )
             response.raise_for_status()
             return response.json()
@@ -202,13 +223,20 @@ def _parse_error_message(response: httpx.Response) -> str:
 
 
 async def api_request_with_error(
-    method: str, endpoint: str, json=None, params=None, timeout=30.0
+    method: str,
+    endpoint: str,
+    json=None,
+    params=None,
+    timeout=30.0,
+    auth_token=None,
+    use_bot_key=False,
 ):
     url = f"{API_BASE_URL.rstrip('/')}{endpoint}"
+    headers = _auth_headers(auth_token, use_bot_key)
     async with httpx.AsyncClient() as client:
         try:
             response = await client.request(
-                method, url, json=json, params=params, timeout=timeout
+                method, url, json=json, params=params, timeout=timeout, headers=headers
             )
             response.raise_for_status()
             return response.json(), None
@@ -229,23 +257,31 @@ async def api_request_with_error(
             return None, str(e) or "Request failed"
 
 
+def _token(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    """Per-user access token for authenticated API calls."""
+    return context.user_data.get("token")
+
+
 async def _get_user_id(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> Optional[str]:
-    """Get user_id from context or restore from API by telegram ID."""
+    """Get user_id + token from context, or restore via telegram auth (idempotent)."""
     user_id = context.user_data.get("user_id")
-    if user_id:
+    token = context.user_data.get("token")
+    if user_id and token:
         return user_id
     user = update.effective_user
     if not user:
         return None
-    user_info = await api_request("GET", "/user", params={"telegramId": str(user.id)})
-    if not user_info or not user_info.get("userId"):
+    data = await api_request(
+        "POST", "/auth/telegram", json={"telegramId": str(user.id)}, use_bot_key=True
+    )
+    if not data or not data.get("userId") or not data.get("token"):
         return None
-    user_id = user_info["userId"]
-    context.user_data["user_id"] = user_id
+    context.user_data["user_id"] = data["userId"]
+    context.user_data["token"] = data["token"]
     context.user_data["telegram_id"] = str(user.id)
-    return user_id
+    return data["userId"]
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -278,7 +314,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _reply_or_edit(update, context, text)
         return
 
-    stats = await api_request("GET", "/stats/aggregate")
+    stats = await api_request("GET", "/stats/aggregate", use_bot_key=True)
     stats_block = _format_global_stats(stats)
     text = (
         "👋 **Hope VPN Bot**\n\n"
@@ -305,7 +341,7 @@ async def show_server_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    raw = await api_request("GET", "/servers", params={"userId": str(user_id)})
+    raw = await api_request("GET", "/servers", auth_token=_token(context))
     if raw is None:
         text = "⚠️ Error fetching servers. Try again."
         await _reply_or_edit(
@@ -358,7 +394,7 @@ async def show_server_details(
         await show_main_menu(update, context)
         return
     server = await api_request(
-        "GET", f"/servers/{server_id}", params={"userId": user_id}
+        "GET", f"/servers/{server_id}", auth_token=_token(context)
     )
     if not server:
         await _reply_or_edit(
@@ -424,10 +460,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     logger.info("User %s (%s) started.", user.first_name, user.id)
     signup_data = await api_request(
-        "POST", "/signup", json={"telegramId": str(user.id)}
+        "POST", "/auth/telegram", json={"telegramId": str(user.id)}, use_bot_key=True
     )
     user_id = signup_data.get("userId") if signup_data else None
-    if not user_id:
+    token = signup_data.get("token") if signup_data else None
+    if not user_id or not token:
         text = (
             "👋 Welcome!\n\n"
             "⚠️ Could not connect to the API. Check it is running and try /start again."
@@ -435,20 +472,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(text, parse_mode="Markdown")
         return
     context.user_data["user_id"] = user_id
+    context.user_data["token"] = token
     context.user_data["telegram_id"] = str(user.id)
-    stats = await api_request("GET", "/stats/aggregate")
+    stats = await api_request("GET", "/stats/aggregate", use_bot_key=True)
     stats_block = _format_global_stats(stats)
-    user_info = await api_request(
-        "GET", "/user", params={"userId": user_id, "telegramId": str(user.id)}
-    )
-    if user_info and user_info.get("userId") != user_id:
-        context.user_data["user_id"] = user_info["userId"]
-    selections = (user_info or {}).get("selections") or []
+    user_info = await api_request("GET", "/user", auth_token=_token(context))
+    creds = (user_info or {}).get("credentials") or []
     servers_raw = await api_request(
-        "GET", "/servers", params={"userId": str(context.user_data["user_id"])}
+        "GET", "/servers", auth_token=_token(context)
     )
     servers = servers_raw if isinstance(servers_raw, list) else []
-    has_account = bool(selections or servers)
+    has_account = bool(creds or servers)
     if has_account:
         await show_main_menu(update, context)
         return
@@ -529,8 +563,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     resp, err = await api_request_with_error(
         "POST",
         "/selections",
-        json={"userId": user_id, "token": token, "provider": "hetzner"},
+        json={"token": token, "provider": "hetzner"},
         timeout=15.0,
+        auth_token=_token(context),
     )
     context.user_data.pop("awaiting_token", None)
     if not resp:
@@ -580,7 +615,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode="Markdown",
         )
         resp, err = await api_request_with_error(
-            "POST", "/servers/create", json={"userId": user_id}, timeout=60.0
+            "POST", "/servers/create", timeout=60.0, auth_token=_token(context)
         )
         if not resp:
             err_text = err or "Check token/funds."
@@ -631,7 +666,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == CB_CONFIRM_DELETE:
         await query.edit_message_text("Deleting…")
         resp, err = await api_request_with_error(
-            "DELETE", "/user", json={"userId": user_id}, timeout=20.0
+            "DELETE", "/user", timeout=20.0, auth_token=_token(context)
         )
         context.user_data.clear()
         if resp:
@@ -652,7 +687,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         server_id = data[len(CB_CHECK) :]
         await query.edit_message_text("🇮🇷 Checking Iran reachability…")
         result = await api_request(
-            "GET", f"/servers/{server_id}/check", params={"userId": str(user_id)}
+            "GET", f"/servers/{server_id}/check", auth_token=_token(context)
         )
         if not result:
             text = "⚠️ Check failed."
@@ -679,8 +714,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         result, err = await api_request_with_error(
             "GET",
             f"/servers/{server_id}/vpn-verify",
-            params={"userId": str(user_id)},
             timeout=15.0,
+            auth_token=_token(context),
         )
         if not result:
             text = f"⚠️ Verify failed: {err or 'Unreachable.'}"
@@ -698,8 +733,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         result, err = await api_request_with_error(
             "GET",
             f"/servers/{server_id}/metrics",
-            params={"userId": str(user_id)},
             timeout=15.0,
+            auth_token=_token(context),
         )
         if not result:
             text = err or "Could not fetch metrics."
